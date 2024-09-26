@@ -1,4 +1,4 @@
-$lines = Get-Content "usersdo.txt"
+$lines = Get-Content "seed.txt"
 $seeduser = $false
 $seedpassword = $false
 $seedtargets = $false
